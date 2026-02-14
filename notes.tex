@@ -1,0 +1,912 @@
+\documentclass[12pt, letterpaper, twoside]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage[T1,T2A]{fontenc}
+\usepackage[english,russian]{babel}
+\usepackage[left=2cm,right=2cm,top=2cm,bottom=2cm]{geometry}
+
+\usepackage{color} %% это для отображения цвета в коде
+\usepackage{listings} %% собственно, это и есть пакет listings
+
+\usepackage{caption}
+\DeclareCaptionFont{white}{\color{white}} %% это сделает текст заголовка белым
+%% код ниже нарисует серую рамочку вокруг заголовка кода.
+\DeclareCaptionFormat{listing}{\colorbox{gray}{\parbox{\textwidth}{#1#2#3}}}
+\captionsetup[lstlisting]{format=listing,labelfont=white,textfont=white}
+
+\graphicspath{ {img/} }
+\title{Python profiler}
+\author{Oleg Shipulin} 
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\thispagestyle{empty} % Убираем нумерацию на титуле
+\newpage % Разрыв страницы после титула
+
+\tableofcontents % Добавляем оглавление
+\newpage
+
+\lstset{
+	breaklines=true,
+	captionpos=t,
+	tabsize=2,
+	numbersep=5pt,
+	numberstyle=\tiny,
+	basicstyle=\small\sffamily,
+	numbers=left,
+	stepnumber=1,
+	showtabs=false,
+	frame=single,
+}
+
+\section{Введение}
+\subsection{Мотивация}
+Так как Python сам по себе не самый быстрый язык программирования, то по мере
+роста проекта, усложнения его архитектуры и увеличения объемов обрабатывамых данных, даже
+незначительные куски неэффективного кода могут накапливать задержки, превращая программу в
+невероятно медленную. Пример такого кода - применение не самой оптимизированный структуры
+данных для конкретного сценария.
+
+Найти bottleneck (узкое горлышко) и не самого оптимизированного кода помогает профилирование,
+о котором и пойдёт речь в последующей статье.
+
+\subsection{Объект и предмет исследования}
+
+\hspace{0.44cm}\textbf{Объектом} исследования являются программные средства динамического анализа
+производительности кода на языке Python, включая как встроенные и сторонние
+профилировщики, так и системные утилиты, позволяющие исследовать выполнение
+Python-программ на различных уровнях абстракции: от интерпретируемого кода
+до нативных расширений и системных вызовов.
+
+\textbf{Предметом} исследования выступают методы и техники профилирования,
+реализованные в этих средствах: инструментирование (tracing),
+статистическое профилирование (sampling), построчный анализ,
+профилирование памяти, а также подходы к анализу производительности
+на уровне операционной системы (perf, Valgrind) и их применимость
+к Python-приложениям.
+
+\subsection{Цель исследования}
+
+\hspace{0.44cm}\textbf{Цель} работы — провести комплексный сравнительный анализ
+инструментов профилирования Python, охватывающий все уровни исполнения
+программы: от исходного кода на Python до нативных расширений и
+взаимодействия с ядром ОС. На основе этого анализа выявить сильные
+и слабые стороны каждого класса инструментов, определить
+области их эффективного применения и предложить рекомендации по
+выбору средств для решения конкретных задач оптимизации производительности.
+
+
+Для достижения поставленной цели необходимо решить следующие \textbf{задачи}:
+\begin{enumerate}
+	\item Рассмотреть теоретические основы профилирования: определить понятие
+	      профилирования, классифицировать существующие методы (инструментирование
+	      и статистическое профилирование), описать их достоинства и недостатки.
+	\item Выполнить обзор профилировщиков, входящих в стандартную
+	      библиотеку Python (profile, cProfile), и охарактеризовать особенности
+	      их реализации, достоинства и ограничения.
+	\item Изучить специализированные профилировщики, ориентированные на
+	      построчный анализ (line\_profiler), анализ памяти (memory\_profiler),
+	      работу с многопоточными и асинхронными приложениями (yappi).
+	\item Рассмотреть инструменты статистического профилирования
+	      (py-spy, pprofile), позволяющие выполнять анализ без остановки
+	      программы и с минимальным вмешательством в её работу.
+	\item Проанализировать возможности профилирования нативных
+	      расширений Python (C extensions) с использованием
+	      инструментов для отладки и профилирования на уровне
+	      языков C/C++ (gprof, Valgrind, perf) и их интеграцию с Python-процессами.
+	\item Исследовать системные профилировщики (perf, SystemTap,
+	      DTrace) и методы их применения для анализа
+	      Python-приложений, включая получение смешанных стеков вызовов (Python + C).
+	\item Сравнить перечисленные средства по ключевым критериям:
+	      скорость работы, точность измерений, область применения,
+	      накладываемые ограничения и требования к окружению.
+	\item На основе проведённого анализа сформулировать практические
+	      рекомендации по выбору инструментов профилирования для различных
+	      сценариев разработки и эксплуатации Python-программ.
+\end{enumerate}
+
+\section{Профилирование}
+\subsection{Виды профилирования}
+\textbf{Профилирование}. Определение профилирования везде разное, но в общем
+смысле \textit{профилирование} - процесс динамического анализа работы кода, направленный
+на сбор метрик её выполнения. К этим метрикам можно отнести:
+
+\begin{itemize}
+	\item Время выполнения функций, методов, строк;
+	\item Использование оперативной памяти, а именно выделение, освобождение, утечки;
+	\item Частота и количество вызовов функций;
+	\item Загрузка cpu;
+	\item Сколько занимает ввод-вывод.
+\end{itemize}
+Полученные данные позволяют выявить узкие места
+(\textit{bottlenecks}) и обоснованно провести оптимизацию.
+
+
+\subsection{Основные методы профилирования}
+По способу сбора информации профилировщики делятся на два принципиально разных класса:
+
+\begin{enumerate}
+	\item \textbf{Инструментирование} (\textit{tracing} или \textit{instrumentation}).
+	\item \textbf{Статистическое профилирование} (\textit{sampling}).
+\end{enumerate}
+
+\subsection{Инструментирование (tracing)}
+Инструментирование — метод динамического анализа,
+при котором в исходный или бинарный код программы автоматически
+встраиваются специальные счетчики (зонды) для точного измерения
+производительности: времени выполнения функций, количества вызовов и потребления памяти.\\
+
+Достоинства:
+\begin{itemize}
+	\item Высокая точность — фиксируется каждый вызов и точное время его выполнения
+	\item Собирается исчерпывающая статистика (количество вызовов, длительность, иерархия).
+\end{itemize}
+
+Недостатки:
+\begin{itemize}
+	\item Значительное замедление работы программы
+	      (от 2–3 до 10–100 раз в зависимости от языка и реализации)
+	\item Сам факт внедрения зондов может искажать реальную производительность, особенно для короткоживущих функций
+\end{itemize}
+
+\subsection{Статистическое (sampling)}
+\textbf{Статистическое профилирование} - метод анализа производительности ПО,
+при котором профилировщик через заданные интервалы времени делает снимки
+состояния программы, определяя выполняемые функции, что позволяет с минимальным
+влиянием на скорость выявить узкие места. На основе этих снимков строится вероятностная
+картина распределения времени.\\
+\textit{Пример} - программа прерывается по таймеру, после чего записываются текущий адрес
+инструкции или стек вызовов.
+
+Вкратцe: при периодическом снимке экрана нет точной, как при tracing, но зато
+почти не замедляется прогон программы. На особо мелких функциях может очень плохо отрабатывать. \\
+
+Достоинства:
+\begin{itemize}
+	\item Минимальное влияние на скорость работы программы
+	\item Возможность профилировать уже запущенные процессы без
+	      их остановки и без доступа к исходному коду.
+\end{itemize}
+
+Недостатки:
+\begin{itemize}
+	\item Меньшая точность - кратковременные функции могут быть грубо говоря не замечены.
+	\item Результаты носят статистический характер и требуют репрезентативной выборки.
+\end{itemize}
+
+\subsection{Сравнение методов}
+Выбор между инструментированием и статистическим профилированием зависит от конкретной задачи:
+\begin{itemize}
+	\item Если требуется абсолютно точная информация о каждом вызове, то предпочтительно инструментирование.
+	\item Если приложение работает в промышленной среде, замедление недопустимо, или нужно диагностировать
+	      проблему на лету, то применяют статистический подход.
+\end{itemize}
+
+В следующих разделах будут рассмотрены конкретные реализации этих методов в экосистеме Python, их особенности и примеры использования.
+
+\newpage
+\section{Профилирование на уровне интерпретатора Python}
+
+\subsection{Инструментирующие профилировщики}
+
+Экосистема Python предлагает широкий выбор профилировщиков
+как в стандартной библиотеке, так и в сторонних пакетах. Среди них:
+
+\begin{itemize}
+	\item profile (стандартная библиотека, Legacy)
+	\item cProfile (стандартная библиотека)
+	\item line\_profiler (построчное профилирование)
+	\item memory\_profiler (профилирование памяти)
+	\item yappi (многопоточное и асинхронное профилирование)
+\end{itemize}
+
+
+\subsubsection{Profile (Legacy)}
+\textbf{\textit{Profile}} - Python-профилировщик, входящий в стандартную библиотеку.
+Он реализует метод инструментирования (\textit{tracing}) и собирает детальную статистику
+о вызовах функций, времени их выполнения и количестве обращений.
+
+\subsubsection*{Реализация}
+
+\textbf{\textit{profile}} написан целиком на Python (pure Python). Это обеспечивает его
+переносимость, но приводит к значительным накладным расходов. Из-за своей реализации он считается
+\textbf{устаревшим}, так как в стандартную библиотеку добавил cProfile, который написан на
+C extensions (то есть на языке Си, который дергается из кода Python).
+
+\subsubsection*{Принцип работы}
+Профилировщик перехватывает события вызова и возврата из каждой функции с помощью
+механизма \texttt{sys.setprofile()}. На каждый вызов засекается время, ведётся
+подсчёт количества обращений и строится иерархия вызовов.
+
+\begin{lstlisting}[label=profile]
+import profile
+
+def heavy_func():
+	total = 0
+	for i in range(1000):
+	total += i ** 2
+	return total
+
+profile.run('heavy_func()', 'profile_stats.prof')
+profile.runctx('heavy_func()', globals(), locals(), 'profile_ctx.prof')
+\end{lstlisting}
+
+Для анализа сохранённой статистики используется модуль \textbf{\textit{pstats}}
+
+\begin{lstlisting}[label=pstats_profile]
+import pstats
+stats = pstats.Stats('profile_stats.prof')
+stats.sort_stats('cumtime').print_stats(10)
+\end{lstlisting}
+
+\subsubsection*{Недостатки profile}
+\begin{enumerate}
+	\item Так как реализация написана на Python, то средство
+	      крайне медленное по сравнению с cProfile и может замедлять прогон кода в десятки раз.
+	\item Из-за высоких накладных расходов искажается реальная производительность.
+	\item Не поддерживает профилирование потоков.
+	\item Поддерживает ручную обработку результатов, что неудобно.
+\end{enumerate}
+
+\subsubsection{cProfile}
+
+\textbf{\textit{cProfile}} - современный, рекомендуемый tracing профилировщик, входящий в
+стандартную библиотеку Python начиная с версии 2.5. Он выполняет инструментирование аналогично
+\textbf{profile}, но написан на языке C в виде расширения (C extensions), что обеспечивает на
+порядок более высокую скорость работы.
+
+\subsubsection*{Принцип работы}
+\textbf{\textit{cProfile}}, аналогично profile, использует перехват событий вызова/возврата через
+API профилирования виртуальной машины Python, реализованное на C. Благодаря низкоуровневой
+интеграции накладные расходы существенно снижено
+
+\subsubsection*{Использование}
+Запустить профилирование можно тремя способами:
+
+\begin{enumerate}
+	\item \textbf{Из командной строки:}
+	      \begin{lstlisting}[language=bash]
+python -m cProfile [-o output_file] script.py
+\end{lstlisting}
+	\item \textbf{Внутри скрипта:}
+	      \begin{lstlisting}[]
+import cProfile
+cProfile.run('heavy_func()', 'cprofile_stats.prof')
+\end{lstlisting}
+	\item \textbf{Контекстный менеджер (Python 3.8+):}
+	      \begin{lstlisting}[]
+with cProfile.Profile() as profiler:
+heavy_func()
+profiler.dump_stats('cprofile_context.prof')
+\end{lstlisting}
+\end{enumerate}
+
+\subsubsection*{Анализ результатов}
+Как и для \texttt{profile}, статистика сохраняется в бинарном формате
+и обрабатывается модулем \textbf{pstats}:
+
+\begin{lstlisting}[]
+import pstats
+stats = pstats.Stats('cprofile_stats.prof')
+# 
+stats.strip_dirs() # remove absolute paths
+stats.sort_stats('tottime') # sorting by your own time
+stats.print_stats(10) # bring out the 10 most "heavy" functions
+\end{lstlisting}
+
+Возможно также получение статистики по вызывающим/вызываемым функциям:
+
+\begin{lstlisting}
+stats.print_callers(5)
+stats.print_callees(5)
+\end{lstlisting}
+
+\subsubsection*{Визуализация}
+Бинарные файлы, созданные \textbf{cProfile}, могут быть преобразованы
+в графические отчёты с помощью сторонних утилит:
+
+\begin{itemize}
+	\item \textbf{snakeviz} — веб-интерфейс для интерактивного исследования
+	      (команда \textbf{snakeviz cprofile\_stats.prof});
+	\item \textbf{gprof2dot} + Graphviz — создание диаграмм в формате DOT
+	      ( \textbf{python -m gprof2dot -f pstats cprofile\_stats.prof | dot -Tpng -o output.png} );
+	\item \textbf{pyprof2calltree} — конвертация для просмотра в KCachegrind.
+\end{itemize}
+
+
+\subsubsection*{Сравнение с profile}
+\begin{itemize}
+	\item \textbf{Скорость:} \textbf{cProfile} работает в 5–20 раз быстрее
+	      \textbf{profile} (накладные расходы приблизительно 10–30\% против 200–1000\%).
+	\item \textbf{Точность:} за счёт меньшего искажения времени выполнения результаты \texttt{cProfile} ближе к реальности.
+	\item \textbf{Функциональность:} оба инструмента предоставляют одинаковый набор данных и API, но \texttt{cProfile} дополнительно поддерживает профилирование многопоточных программ.
+	\item \textbf{Статус:} \texttt{cProfile} активно поддерживается и рекомендуется официальной документацией; \texttt{profile} сохраняется для обратной совместимости.
+\end{itemize}
+
+\subsubsection*{Недостатки cProfile}
+\begin{enumerate}
+	\item Всё ещё ощутимое замедление (от 10\% до 50\% в зависимости от программы), что ограничивает применение в промышленной эксплуатации.
+	\item Невозможность профилирования асинхронного кода (\texttt{async/await}) без дополнительных ухищрений (для этого существуют специализированные инструменты, например \texttt{yappi}).
+	\item Отсутствие встроенных средств для анализа использования памяти.
+\end{enumerate}
+
+\subsubsection*{Пример использования cProfile: от запуска до визуализации}
+Рассмотрим полный цикл работы с \texttt{cProfile} на примере функции, выполняющей вычисление чисел Фибоначчи рекурсивным и итеративным способами. Это позволит наглядно продемонстрировать сбор статистики, её анализ и построение графического отчёта.
+
+\begin{lstlisting}
+def fib_recursive(n):
+    if n <= 1:
+        return n
+    return fib_recursive(n-1) + fib_recursive(n-2)
+
+def fib_iterative(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+def main():
+    fib_recursive(35)
+    fib_iterative(100000)
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+\paragraph{1. Запуск профилирования}
+Выполним профилирование из командной строки, сохранив результаты в файл \texttt{fib.prof}:
+
+\begin{lstlisting}
+python -m cProfile -o fib.prof fib.py
+\end{lstlisting}
+
+\paragraph{2. Базовый анализ в консоли с помощью pstats}
+Загрузим статистику и выведем 5 самых «тяжёлых» функций по собственному времени (\texttt{tottime}):
+
+\begin{lstlisting}
+import pstats
+stats = pstats.Stats('fib.prof')
+stats.strip_dirs()
+stats.sort_stats('tottime')
+stats.print_stats(5)
+\end{lstlisting}
+
+Результат будет содержать примерно следующую информацию (время и количество вызовов зависят от системы):
+
+\begin{lstlisting}[basicstyle=\tiny\ttfamily]
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    1.873    1.873    2.569    2.569 fib.py:1(fib_recursive)
+ 331160281   1.695   0.000   1.695   0.000 fib.py:2(fib_recursive)
+        1    0.696    0.696    2.569    2.569 fib.py:1(<module>)
+        1    0.000    0.000    0.000    0.000 fib.py:6(fib_iterative)
+        1    0.000    0.000    0.000    0.000 {method 'disable' ...}
+\end{lstlisting}
+
+Здесь видно, что рекурсивная функция вызвана множество раз
+и занимает почти всё время, тогда как итеративная выполняется мгновенно.
+Уже на этом этапе очевидно «узкое место».
+
+\paragraph{3. Интерактивная визуализация с SnakeViz}
+SnakeViz предоставляет браузерный интерфейс для изучения результатов. Установка и запуск:
+
+\begin{lstlisting}
+pip install snakeviz
+snakeviz fib.prof
+\end{lstlisting}
+
+Откроется диаграмма в виде «солнечных лучей» (sunburst) или иерархического списка, где размер каждого сектора пропорционален времени выполнения. На ней сразу заметен огромный вклад \texttt{fib\_recursive} и её рекурсивных вызовов.
+
+\paragraph{4. Генерация графа вызовов с gprof2dot}
+Для создания диаграммы в формате PNG, отображающей связи между функциями, используем \texttt{gprof2dot} и Graphviz:
+
+\begin{lstlisting}
+pip install gprof2dot
+python -m gprof2dot -f pstats fib.prof | dot -Tpng -o fib_callgraph.png
+\end{lstlisting}
+
+Полученное изображение наглядно показывает, что \texttt{fib\_recursive} вызывает саму себя многократно, тогда как \texttt{fib\_iterative} изолирована и не имеет дочерних вызовов.
+
+\paragraph{5. Интеграция с юнит-тестами}
+Профилировщик можно встроить в тесты для контроля регрессий. Например, используя \texttt{unittest}:
+
+\begin{lstlisting}
+import cProfile
+import unittest
+
+class TestFibonacci(unittest.TestCase):
+    def test_performance(self):
+        profiler = cProfile.Profile()
+        profiler.enable()
+        fib_iterative(100000)
+        profiler.disable()
+        stats = pstats.Stats(profiler)
+        stats.sort_stats('cumtime')
+        # Checking that the execution time does not exceed the threshold
+        self.assertLess(stats.total_tt, 0.01)
+\end{lstlisting}
+
+\subsubsection{line\_profiler}
+\textbf{\textit{line\_profiler}} — сторонний инструмент для построчного профилирования кода Python.
+В отличие от \texttt{cProfile}, который показывает время выполнения функций целиком,
+\texttt{line\_profiler} измеряет время, затрачиваемое на каждую отдельную строку
+внутри функции. Это позволяет с высокой точностью локализовать «узкие места»
+на уровне отдельных операций.
+
+\subsubsection*{Установка}
+Устанавливается через \texttt{pip}:
+\begin{lstlisting}[language=bash]
+pip install line_profiler
+\end{lstlisting}
+После установки становится доступен исполняемый модуль \texttt{kernprof} и сам профилировщик.
+
+\subsubsection*{Принцип работы}
+\texttt{line\_profiler} использует инструментирование исходного кода: он модифицирует
+байткод функции, вставляя измерительные зонды перед каждой строкой. При выполнении
+функции замеряется время, прошедшее между зондами. Накладные
+расходы выше, чем у \texttt{cProfile}, но несравнимо более
+детальная информация оправдывает это при тонкой оптимизации.
+
+\subsubsection*{Использование}
+Основной способ применения — декорирование целевой функции \texttt{@profile}.
+Важно: декоратор автоматически добавляется при запуске через
+\texttt{kernprof}, вручную импортировать его не нужно.
+
+\begin{lstlisting}
+@profile
+def slow_function():
+total = 0
+for i in range(100000):
+total += i ** 2
+return total
+
+if name == 'main':
+slow_function()
+\end{lstlisting}
+
+Запуск профилирования:
+
+\begin{lstlisting}[language=bash]
+kernprof -l -v example.py
+\end{lstlisting}
+
+Ключ \texttt{-l} включает построчный режим (line\_profiler), \texttt{-v}
+выводит результат сразу в консоль. По умолчанию создаётся файл
+\texttt{example.py.lprof}, который можно просмотреть позже утилитой
+\texttt{python -m line\_profiler example.py.lprof}.
+
+\subsubsection*{Пример вывода}
+Результат представляет собой таблицу со следующими столбцами:
+\begin{itemize}
+	\item \texttt{Line} — номер строки;
+	\item \texttt{Hits} — количество выполнений данной строки;
+	\item \texttt{Time} — общее время, затраченное на строку (в микросекундах);
+	\item \texttt{Per Hit} — среднее время одного выполнения;
+	\item \texttt{\% Time} — доля от общего времени функции;
+	\item \texttt{Line Contents} — исходный код строки.
+\end{itemize}
+
+Пример вывода для приведённой функции:
+\begin{lstlisting}[basicstyle=\tiny\ttfamily]
+Total time: 0.023456 s
+File: example.py
+Function: slow_function at line 4
+
+Line # Hits Time Per Hit % Time Line Contents
+==============================================================
+4 @profile
+5 def slow_function():
+6 1 4.0 4.0 0.0 total = 0
+7 10001 10234.0 1.0 43.6 for i in range(100000):
+8 10000 13218.0 1.3 56.4 total += i ** 2
+9 1 0.0 0.0 0.0 return total
+\end{lstlisting}
+
+Видно, что основное время тратится на вычисление квадрата и суммирование внутри цикла.
+
+\subsubsection*{Достоинства}
+\begin{itemize}
+	\item Высочайшая детализация — информация по каждой строке.
+	\item Простота использования — достаточно добавить декоратор.
+	\item Интеграция с \texttt{IPython} (магическая команда \texttt{\%lprun}).
+\end{itemize}
+
+\subsubsection*{Недостатки}
+\begin{itemize}
+	\item Замедление работы функции в разы (иногда на порядок), что ограничивает применение на реальных данных.
+	\item Необходимость модифицировать исходный код (добавлять декоратор).
+	\item Не работает с асинхронными функциями напрямую.
+	\item Отсутствие встроенной визуализации (но результаты можно экспортировать).
+\end{itemize}
+
+\texttt{line\_profiler} незаменим, когда нужно понять, какая именно операция внутри большой функции тормозит
+выполнение, и все другие методы уже не дают достаточной информации.
+
+
+\subsection{Статистические профилировщики}
+\begin{itemize}
+	\item py\_spy - семплирование без остановки процесса
+	\item pprofile - гибридный подход (детерминированный и статистический режимы)
+\end{itemize}
+
+
+\subsubsection{py-spy}
+\textbf{\textit{py-spy}} — семплирующий (статистический) профилировщик для Python-программ,
+написанный на языке Rust. Его ключевая особенность — полная независимость от целевого процесса:
+\texttt{py-spy} запускается вне интерпретатора Python и читает память профилируемой
+программы напрямую через системные вызовы (\texttt{process\_vm\_readv}
+в Linux, \texttt{vm\_read} в macOS, \texttt{ReadProcessMemory} в Windows).
+Это позволяет:
+
+\begin{itemize}
+	\item Профилировать уже запущенные процессы без их остановки;
+	\item Не вносить никаких изменений в исходный код;
+	\item Работать с «боевыми» (production) сервисами без заметного
+	      влияния на производительность (оверхед менее 1–2\%);
+	\item Собирать данные даже в тех случаях, когда целевой интерпретатор
+	      собран без отладочных символов (используется сканирование секции BSS).
+\end{itemize}
+
+\subsubsection*{Установка}
+\begin{lstlisting}[language=bash]
+pip install py-spy
+\end{lstlisting}
+Также доступна установка через пакетные менеджеры: \texttt{brew install py-spy}
+(macOS), \texttt{yay -S py-spy} (Arch Linux), а для Rust-экосистемы
+— \texttt{cargo install py-spy}.
+
+\subsubsection*{Принцип работы}
+\texttt{py-spy} читает память процесса и обходит структуры CPython: находит
+глобальный \texttt{PyInterpreterState}, из него — все активные потоки,
+а затем и цепочки объектов \texttt{PyFrameObject}, формирующих стек вызовов.
+Поскольку \texttt{py-spy} не выполняется внутри интерпретатора, он не
+перехватывает события вызова/возврата и не замедляет работу кода.
+Семплирование происходит с заданной частотой (по умолчанию 100 Гц).
+
+\subsubsection*{Базовые команды}
+\texttt{py-spy} предоставляет три основных режима работы:
+
+\begin{enumerate}
+	\item \textbf{\texttt{record}} — запись профиля в файл с последующей визуализацией:
+	      \begin{lstlisting}[language=bash]
+# Attach to a running process
+py-spy record -o profile.svg --pid 12345
+
+# Start a new process under profiler
+py-spy record -o profile.svg -- python myprogram.py
+\end{lstlisting}
+	      Поддерживаемые форматы: SVG (интерактивный флеймграф), \texttt{speedscope}, сырые данные.
+
+	\item \textbf{\texttt{top}} — интерактивный просмотр «горячих» функций в
+	      реальном времени, аналогичный утилите \texttt{top}:
+	      \begin{lstlisting}[language=bash]
+py-spy top --pid 12345
+\end{lstlisting}
+
+	\item \textbf{\texttt{dump}} — мгновенный снимок стека
+	      вызовов всех потоков (полезно при зависаниях):
+	      \begin{lstlisting}[language=bash]
+py-spy dump --pid 12345
+py-spy dump --pid 12345 --locals  # also show local variables
+\end{lstlisting}
+\end{enumerate}
+
+\subsubsection*{Ключевые возможности}
+\begin{itemize}
+	\item \textbf{Профилирование нативных расширений} (\texttt{--native}) —
+	      отображение имён функций из C/C++/Cython (доступно на Linux x86\_64 и Windows) .
+	\item \textbf{Отслеживание дочерних процессов} (\texttt{--subprocesses}) —
+	      автоматическое прикрепление к порождённым процессам (например, при
+	      использовании \texttt{multiprocessing} или \texttt{gunicorn}).
+	\item \textbf{Фильтрация по GIL} (\texttt{--gil}) — учёт только потоков
+	      , удерживающих глобальную блокировку интерпретатора.
+	\item \textbf{Исключение «спящих» потоков} — \texttt{py-spy} опрашивает
+	      состояние потоков через \texttt{/proc/PID/stat} (Linux),
+	      \texttt{thread\_basic\_info} (macOS) или анализ системных
+	      вызовов (Windows) и не включает в отчёт стеки, заведомо находящиеся
+	      в ожидании. Поведение можно изменить флагом \texttt{--idle}.
+\end{itemize}
+
+\subsubsection*{Особые требования}
+При профилировании существующего процесса \texttt{py-spy} требует прав
+на чтение чужой памяти. В macOS это всегда требует \texttt{sudo}, в
+Linux — если процесс запущен не самим профилировщиком . В контейнерах
+Docker и Kubernetes необходимо добавить capability \texttt{SYS\_PTRACE},
+иначе вызовы \texttt{process\_vm\_readv} будут запрещены.
+
+\subsubsection*{Достоинства}
+\begin{itemize}
+	\item Нулевое вмешательство в код программы;
+	\item Крайне низкие накладные расходы (применимо в продакшене);
+	\item Работа с уже зависшими процессами (команда \texttt{dump});
+	\item Наглядная визуализация (флеймграфы, \texttt{speedscope});
+	\item Кроссплатформенность (Linux, macOS, Windows, FreeBSD).
+\end{itemize}
+
+\subsubsection*{Недостатки}
+\begin{itemize}
+	\item Статистическая природа — кратковременные функции могут быть «пропущены»;
+	\item Требует повышенных привилегий в ряде сценариев;
+	\item Не даёт точного числа вызовов, только долевое распределение времени.
+\end{itemize}
+
+\texttt{py-spy} — оптимальный выбор для диагностики замедлений в промышленной
+эксплуатации, когда невозможно (или нежелательно) перезапускать приложение и
+вносить изменения в код.
+
+\subsubsection{pprofile}
+\textbf{\textit{pprofile}} — легковесный, полностью написанный на Python профилировщик
+, реализующий \textbf{оба} метода сбора информации: детерминированное (trace)
+и статистическое (sample) профилирование. Его главная отличительная черта —
+\textit{строчная гранулярность} (line-granularity) в сочетании с автоматическим
+отслеживанием всех потоков и возможностью работы без модификации исходного кода.
+
+\subsubsection*{Установка}
+\begin{lstlisting}[language=bash]
+pip install pprofile
+\end{lstlisting}
+После установки становится доступен одноимённый исполняемый модуль.
+
+\subsubsection*{Два режима работы}
+
+\textbf{1. Детерминированное профилирование (по умолчанию)}
+В этом режиме \texttt{pprofile} перехватывает каждое событие выполнения строки
+(line events), используя механизм \texttt{sys.settrace}. Это даёт абсолютно полную
+картину: сколько раз выполнилась каждая строка, сколько времени заняла,
+какова иерархия вызовов. Расплата — огромные накладные расходы (замедление в 10–100 раз),
+что ограничивает применение только короткими тестовыми сценариями.
+
+\begin{lstlisting}[language=bash]
+# Running the script under a deterministic profiler
+pprofile myscript.py
+
+# Ignore system paths (so as not to clutter the output)
+pprofile --exclude-syspath myscript.py
+
+# Launching the module
+pprofile -m mymodule -- --arg-for-module
+\end{lstlisting}
+
+Вывод представляет собой аннотированный исходный код: перед каждой строкой указывается
+количество попаданий (Hits), общее время, время на один вызов и доля в процентах.
+
+\begin{lstlisting}[basicstyle=\tiny\ttfamily]
+File: demo/threads.py
+File duration: 1.00168s (99.60%)
+Line #|      Hits|         Time|Time per hit|      %|Source code
+------+----------+-------------+------------+------+-----------
+     4|         2|  3.21865e-05| 1.60933e-05|  0.00%|    def func():
+     5|         1|      1.00111|     1.00111| 99.54%|    time.sleep(1)
+\end{lstlisting}
+
+\textbf{2. Статистическое профилирование} (\texttt{--statistic})
+В этом режиме \texttt{pprofile} периодически опрашивает стеки всех
+потоков (или только текущего) с заданным интервалом. Накладные
+расходы снижаются до приемлемых 1–5\%, что позволяет применять
+\texttt{pprofile} к длительно работающим приложениям.
+
+\begin{lstlisting}[language=bash]
+# Sampling every 0.01 seconds
+pprofile --statistic 0.01 myscript.py
+
+# Current stream only (single), 1 ms period
+pprofile --statistic 0.001 --single myscript.py
+\end{lstlisting}
+
+Недостаток статистического режима — потеря точности: вместо реального времени
+выполнения строки показывают только количество «попаданий» в сэмплы, что
+даёт лишь приблизительную картину.
+
+\subsubsection*{Поддержка многопоточности}
+В отличие от \texttt{cProfile}, \texttt{pprofile} «из коробки» корректно
+отслеживает порождаемые потоки. В детерминированном режиме для этого необходимо
+установить флаг \texttt{--threads 1} (или \texttt{threads=True} в API),
+в статистическом — все потоки процесса видны автоматически.
+
+\subsubsection*{Визуализация (Callgrind / KCachegrind)}
+Одна из сильнейших сторон \texttt{pprofile} — экспорт в формат \texttt{callgrind},
+совместимый с KCachegrind и QCachegrind. Это даёт возможность исследовать профиль
+в графическом интерфейсе с древовидными диаграммами, поиском «горячих» путей и фильтрацией.
+
+\begin{lstlisting}[language=bash]
+pprofile --format callgrind --out cachegrind.out.myprofile myscript.py
+# Or short entry (file name starts with cachegrind.out)
+pprofile --out cachegrind.out.myprofile myscript.py
+
+# Additionally - package the source code in a zip to display the paths correctly
+pprofile --out cachegrind.out.myprofile --zipfile src.zip myscript.py
+\end{lstlisting}
+
+\subsubsection*{Программный API}
+\texttt{pprofile} можно встраивать непосредственно в код, что полезно для
+профилирования отдельных участков:
+
+\begin{lstlisting}
+import pprofile
+
+# Deterministic site profile
+prof = pprofile.Profile()
+with prof():
+    # ... the code for profiling ...
+prof.print_stats()
+
+# Statistical profile (sampling the current stream)
+stat_prof = pprofile.StatisticalProfile()
+with stat_prof(period=0.001):
+# ... the code for profiling ...
+stat_prof.print_stats()
+\end{lstlisting}
+
+\subsubsection*{Сравнение с line\_profiler}
+Оба инструмента дают построчную информацию, но принципиально различаются:
+
+\begin{itemize}
+	\item \texttt{line\_profiler} требует декоратора \texttt{@profile}
+	      и запуска через \texttt{kernprof}, фокусируясь только на отмеченных функциях;
+	\item \texttt{pprofile} анализирует \textit{весь} код приложения
+	      без каких-либо изменений, что удобно для первичного поиска узких
+	      мест, но порождает огромные объёмы вывода.
+\end{itemize}
+
+\subsubsection*{Достоинства}
+\begin{itemize}
+	\item Чистый Python — работает там, где нельзя собрать C-расширение;
+	\item Два режима профилирования в одном инструменте;
+	\item Полная поддержка потоков;
+	\item Экспорт в Callgrind для профессионального анализа;
+	\item Не требует модификации исходного кода (в отличие от \texttt{line\_profiler}).
+\end{itemize}
+
+\subsubsection*{Недостатки}
+\begin{itemize}
+	\item Детерминированный режим неприменим к реальным задачам
+	      из-за колоссального замедления;
+	\item Статистический режим даёт лишь приблизительные результаты;
+	\item Проект давно не обновлялся (последний релиз — 2016 г.) ;
+	\item Меньше возможностей визуализации по сравнению с \texttt{py-spy}
+	      (флеймграфы не строятся напрямую).
+\end{itemize}
+
+\texttt{pprofile} занимает нишу «тяжёлой артиллерии» для всестороннего
+исследовательского профилирования в окружениях, где недопустима компиляция
+или недоступны современные альтернативы. Однако в новых проектах приоритет
+следует отдавать \texttt{py-spy} (продакшен) либо связке
+\texttt{cProfile} + \texttt{snakeviz} (разработка).
+
+\subsection{Специализированные решения}
+
+\subsubsection{yappi}
+\textbf{\textit{yappi}} (Yet Another Python Profiler) — профилировщик, специализирующийся на многопоточных
+и асинхронных приложениях. Он поддерживает как инструментирование (\texttt{tracing}),
+так и статистический режим (\texttt{wall time} и \texttt{cpu time}), и отличается
+низкими накладными расходами при работе с большим количеством потоков.
+
+\subsubsection*{Установка}
+\begin{lstlisting}[language=bash]
+pip install yappi
+\end{lstlisting}
+
+\subsubsection*{Ключевые особенности}
+\begin{itemize}
+	\item \textbf{Поддержка потоков} — корректно учитывает время выполнения каждого потока отдельно.
+	\item \textbf{Поддержка asyncio} — профилирование корутин и задач (с версии 1.3.0).
+	\item \textbf{Два режима таймера}: \texttt{wall-time} (реальное время) и \texttt{cpu-time} (процессорное время).
+	\item \textbf{Статистическое профилирование} — возможность переключения в режим \texttt{sampling} для минимизации накладных расходов.
+	\item \textbf{Богатый API} — запуск, остановка, сброс статистики, получение отчётов в различных форматах.
+\end{itemize}
+
+\subsubsection*{Принцип работы}
+В режиме \texttt{tracing} \texttt{yappi} аналогично \texttt{cProfile} перехватывает
+вызовы функций, но реализация оптимизирована для работы в многопоточной среде (использует
+локальные для потока структуры данных). В режиме \texttt{sampling} профилировщик
+периодически опрашивает стеки всех потоков, что даёт минимальную задержку.
+
+\subsubsection*{Использование}
+Рассмотрим пример профилирования многопоточной программы.
+
+\begin{lstlisting}
+import yappi
+import threading
+import time
+
+def worker(name):
+for _ in range(5):
+time.sleep(0.1)
+print(f"{name} working")
+
+threads = []
+for i in range(3):
+t = threading.Thread(target=worker, args=(f"Thread-{i}",))
+threads.append(t)
+
+yappi.set_clock_type("wall") # "wall" or "cpu"
+yappi.start()
+for t in threads:
+t.start()
+for t in threads:
+t.join()
+yappi.stop()
+
+func_stats = yappi.get_func_stats()
+func_stats.sort("ttot", type="cum").print_all()
+
+thread_stats = yappi.get_thread_stats()
+thread_stats.print_all()
+
+func_stats.save('yappi_stats.prof', type='pstats')
+\end{lstlisting}
+
+\subsubsection*{Пример с asyncio}
+Начиная с версии 1.3.0, \texttt{yappi} может профилировать асинхронный код.
+
+\begin{lstlisting}
+import yappi
+import asyncio
+
+async def fetch_data():
+await asyncio.sleep(0.1)
+return "data"
+
+async def main():
+results = await asyncio.gather(fetch_data(), fetch_data(), fetch_data())
+
+yappi.set_clock_type("wall")
+yappi.start()
+asyncio.run(main())
+yappi.stop()
+
+stats = yappi.get_func_stats()
+stats.print_all()
+\end{lstlisting}
+
+\subsubsection*{Сравнение с cProfile}
+\begin{itemize}
+	\item \textbf{Потоки:} \texttt{cProfile} не разделяет статистику по потокам — все вызовы смешиваются;
+	      \texttt{yappi} предоставляет отдельную статистику для каждого потока.
+	\item \textbf{Asyncio:} \texttt{cProfile} видит только вызовы функций, но не корутины;
+	      \texttt{yappi} корректно отображает время выполнения асинхронных задач.
+	\item \textbf{Скорость:} В режиме \texttt{tracing} \texttt{yappi} немного медленнее
+	      \texttt{cProfile} из-за дополнительных блокировок; в режиме \texttt{sampling} — значительно быстрее.
+	\item \textbf{Гибкость:} \texttt{yappi} позволяет динамически переключать режимы,
+	      очищать статистику и профилировать только интересующие потоки.
+\end{itemize}
+
+\subsubsection*{Достоинства}
+\begin{itemize}
+	\item Полноценная поддержка многопоточности и asyncio.
+	\item Два режима профилирования (инструментирование и семплирование).
+	\item Низкие накладные расходы в режиме \texttt{sampling} (подходит для продакшена).
+	\item Богатый API и возможность экспорта в формат \texttt{pstats}.
+	\item Поддержка профилирования времени ЦП и реального времени.
+\end{itemize}
+
+\subsubsection*{Недостатки}
+\begin{itemize}
+	\item Менее распространён, чем \texttt{cProfile}, меньше интеграций
+	      с визуализаторами (хотя файлы \texttt{pstats} совместимы).
+	\item В режиме \texttt{tracing} может быть медленнее
+	      \texttt{cProfile} для однопоточных приложений.
+	\item Документация не всегда подробна, хотя проект
+	      активно развивается.
+\end{itemize}
+
+\texttt{yappi} становится незаменимым инструментом при разработке
+высоконагруженных сетевых сервисов, веб-приложений на asyncio, а также
+при необходимости профилирования в условиях, когда нельзя останавливать сервер (режим семплирования).
+
+
+\section{Профилирование нативных расширений (C extensions)}
+\subsection{Особенности профилирование кода на C/C++ внутри Python}
+\subsection{Инструменты для анализа C/C++: gprof, Valgrind (Callgrind), Google PerfTools}
+\subsection{Получение смешанных стеков вызовов (Python + C) с помощью perf и eBPF}
+
+\section{Системное профилирование Python-приложений}
+\subsection{Использование утилиты perf в Linux для анализа на уровне ядра}
+\subsection{DTrace и SystemTap: динамическая трассировка}
+\subsection{Профилирование операций ввода-вывода и работы с сетью}
+
+\section{Сравнительный анализ и практические рекомендации}
+
+\end{document}
